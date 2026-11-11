@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Teste — UI do Mundo Olhos</title>
+<link rel="stylesheet" href="../css/style.css">
+<style>
+  /* "cena" falsa atrás da UI: céu + colinas, só para ver contraste */
+  #game-root { background:
+    radial-gradient(ellipse 60% 30% at 30% 92%, #8fd47a 0 60%, transparent 61%),
+    radial-gradient(ellipse 70% 34% at 80% 98%, #a6e3a1 0 60%, transparent 61%),
+    radial-gradient(circle at 78% 22%, #fff6c0 0 4%, transparent 9%),
+    linear-gradient(180deg, #9fd6ff 0%, #ffd9ef 62%, #c9f0b0 62.2%, #9ee07a 100%); }
+  #game-root canvas { opacity: 0; }
+</style>
+</head>
+<body>
+<div id="game-root"><canvas id="cv"></canvas></div>
+<div id="ui-root"></div>
+<script type="module">
+// Página de teste da UI com stubs mínimos de game/state/audio/input/render/world/player/missions/npcs.
+// Uso no harness: --page tests/ui.html --script <roteiro.js>. ?real=1 não muda nada; ?font usa a fonte do Google.
+import { createBus } from '../src/core/bus.js';
+import { defaultState } from '../src/core/state.js';
+import { createInput } from '../src/core/input.js';
+import { MISSIONS, NPCS } from '../src/data/story.js';
+import { createUI } from '../src/ui/ui.js';
+
+const log = [];
+const audio = {
+  init() {}, setVolumes(v) { log.push(['setVolumes', v]); }, update() {},
+  play(n) { log.push(['play', n]); }, murmur() { audio.murmurs = (audio.murmurs || 0) + 1; },
+  quimVoice() {}, pincesoVoice() {}, setMusic() {}, note(i) { log.push(['note', i]); },
+};
+const state = defaultState();
+Object.assign(state, {
+  jujubas: 23, totalJujubasFound: 41, playTime: 1520, pincesoJoined: true, dayTime: 0.42,
+  discoveredRegions: { campo: true, vila: true, ninhal: true, cidade: true },
+  regionColor: { campo: 0.9, vila: 0.55, ninhal: 0.35, bosque: 0, cidade: 0.2, pico: 0 },
+  drinksTried: { latte_morango: true, cha_lavanda: true },
+  accessories: { owned: { coroa_flores: true, laco: true }, equipped: 'laco' },
+  discoveredPaths: { atalho_raizes: true },
+});
+for (const k of ['jj_campo_001', 'jj_campo_002', 'jj_vila_003']) state.collected[k] = true;
+const st = (id, s) => (state.missions[id] = { status: s, step: 0, progress: {} });
+['bom_dia', 'flores_murchas', 'enfeitalho', 'filhote_sem_ninho', 'cartas_bom_dia'].forEach((id) => st(id, 'done'));
+['gato_no_telhado', 'ovinhos_perdidos', 'coral_da_floresta'].forEach((id) => st(id, 'active'));
+['hortas_com_sede', 'lago_sorriso', 'penas_ao_vento', 'casa_nova'].forEach((id) => st(id, 'available'));
+state.activeMissionId = 'gato_no_telhado';
+
+const player = { position: { x: -6, y: 2, z: 30 }, rotY: Math.PI * 0.8, setMood(m) { log.push(['mood', m]); } };
+const yaw = { v: 0.6 };
+const camera = { get matrixWorld() { const s = Math.sin(yaw.v), c = Math.cos(yaw.v); return { elements: [1, 0, 0, 0, 0, 1, 0, 0, s, 0, c, 0, 0, 0, 0, 1] }; } };
+const npcList = ['vovo_lazinha', 'seu_repolhudo', 'sapinho_coaxe', 'mamae_sabia', 'seu_miolo', 'dona_nata'].map((id, i) => {
+  const d = NPCS.find((n) => n.id === id);
+  return { id, name: d.name, def: d, position: { x: d.x, y: 0, z: d.z }, marker: i < 4 ? '!' : null, visible: true };
+});
+const progressOf = { gato_no_telhado: { have: 2, need: 3, label: 'Pistas do Bolacha' }, ovinhos_perdidos: { have: 1, need: 5, label: 'Ovinhos' } };
+const hints = { gato_no_telhado: 'Siga as pegadinhas de patinha até a Casa do Telhado Alto.', ovinhos_perdidos: 'Ache os ovinhos pelo Ninhal. Nada de correr!', coral_da_floresta: 'Fale com o Tico na Clareira Cantante.' };
+const missions = {
+  list: () => MISSIONS.map((m) => {
+    const s = state.missions[m.id]?.status ?? 'locked';
+    return { ...m, mission: m, status: s, hint: s === 'active' ? hints[m.id] : null, progress: s === 'active' ? progressOf[m.id] ?? null : null, tracked: state.activeMissionId === m.id };
+  }),
+  tracked() {
+    const m = MISSIONS.find((x) => x.id === state.activeMissionId);
+    return m ? { mission: m, step: m.steps[1], stepIndex: 1, hint: hints[m.id], progress: progressOf[m.id] ?? null } : null;
+  },
+  track(id) { state.activeMissionId = id; return true; },
+  markerTarget: () => (state.activeMissionId === 'gato_no_telhado' ? { x: 46, y: 9.5, z: -6 } : { x: -195, y: 4, z: 35 }),
+};
+
+const game = {
+  debug: true, params: new URLSearchParams(location.search), bus: createBus(), state, paused: false, cinematic: false,
+  time: { elapsed: 0 }, audio, player, missions, log,
+  npcs: { list: npcList, get: (id) => npcList.find((n) => n.id === id) },
+  render: { camera, get dayTime() { return state.dayTime; }, set dayTime(v) { state.dayTime = v; }, timePhase() { const t = state.dayTime; return t < 0.2 || t > 0.8 ? 'noite' : t < 0.3 ? 'amanhecer' : t < 0.7 ? 'dia' : 'entardecer'; }, setQuality(q) { log.push(['quality', q]); }, setMenuMode() {} },
+  world: { regionColor: (id) => state.regionColor[id] ?? 0 },
+  yaw,
+};
+game.ui = createUI(game, document.getElementById('ui-root'));
+game.input = createInput(document.getElementById('cv'));
+game.ui.attachInput(game.input);
+
+let last = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  game.ui.update(dt);
+  game.input.endFrame();
+}
+requestAnimationFrame(frame);
+window.__game = game;
+game.startSession = () => game.bus.emit('session:start', { isNew: false });
+game.ready = true;
+</script>
+</body>
+</html>

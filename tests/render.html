@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Teste — render</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #2a2440; }
+  #info { position: fixed; left: 10px; top: 8px; font: 13px monospace; color: #fff; text-shadow: 0 1px 2px #000; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "../vendor/three/three.module.js", "three/addons/": "../vendor/three/addons/" } }
+</script>
+</head>
+<body>
+<div id="root"></div>
+<div id="info"></div>
+<script type="module">
+// Teste isolado do src/render: chão, objetos toon com olhinhos, janelas e vaga-lumes emissivos.
+// URL: ?time=0.5&quality=alta&sleepy=0..1&view=cena|sol|lua|alto&frozen&menu
+import * as THREE from 'three';
+import { createBus } from '../src/core/bus.js';
+import { toon, enableShadows } from '../src/core/materials.js';
+import { createEyes, registerEyes, updateEyes } from '../src/core/eyes.js';
+import { REGIONS } from '../src/data/worldmap.js';
+import { createRender } from '../src/render/render.js';
+
+const params = new URLSearchParams(location.search);
+const sleepy = Number(params.get('sleepy') ?? 0);
+const state = {
+  dayTime: Number(params.get('time') ?? 0.4),
+  regionColor: Object.fromEntries(REGIONS.map((r) => [r.id, 1 - sleepy])),
+  settings: { quality: params.get('quality') || 'media' },
+};
+const C = { x: 0, z: 165 };  // centro do Campo (para a névoa da região e a órbita do menu)
+const game = {
+  THREE, params, state, bus: createBus(),
+  world: { getHeight: () => 0, regionAt: () => 'campo' },
+  player: { position: new THREE.Vector3(C.x, 0, C.z) },
+};
+const phases = [];
+game.bus.on('time:phase', (p) => phases.push(p.phase));
+const render = createRender(game, document.getElementById('root'));
+game.render = render;
+const scene = render.scene;
+
+// --- cenário de teste ---------------------------------------------------------------------------
+const world = new THREE.Group();
+world.position.set(C.x, 0, C.z);
+scene.add(world);
+
+const ground = new THREE.Mesh(new THREE.CircleGeometry(400, 64).rotateX(-Math.PI / 2), toon('#9ee07a'));
+ground.receiveShadow = true;
+world.add(ground);
+const path = new THREE.Mesh(new THREE.PlaneGeometry(3, 60).rotateX(-Math.PI / 2), toon('#f3d9a4'));
+path.position.set(0, 0.02, -10); path.receiveShadow = true;
+world.add(path);
+const pond = new THREE.Mesh(new THREE.CircleGeometry(5, 40).rotateX(-Math.PI / 2), toon('#7fd0ff', { emissive: '#3a8fd0', emissiveIntensity: 0.2 }));
+pond.position.set(9, 0.03, 2);
+world.add(pond);
+
+function eyesOn(parent, x, y, z, size, rotY = 0) {
+  const e = createEyes({ size, lashes: true });
+  e.position.set(x, y, z); e.rotation.y = rotY;
+  parent.add(e); registerEyes(e);
+}
+
+function tree(x, z, color, s = 1) {
+  const g = new THREE.Group();
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.5, 3, 10), toon('#a7764f'));
+  trunk.position.y = 1.5; g.add(trunk);
+  for (const [dx, dy, dz, r] of [[0, 4, 0, 2], [1.3, 3.4, 0.4, 1.4], [-1.2, 3.5, -0.3, 1.5], [0.2, 5.2, 0, 1.3]]) {
+    const b = new THREE.Mesh(new THREE.SphereGeometry(r, 20, 14), toon(color));
+    b.position.set(dx, dy, dz); g.add(b);
+  }
+  eyesOn(g, 0, 4, 1.95, 0.32);
+  g.position.set(x, 0, z); g.scale.setScalar(s);
+  world.add(enableShadows(g));
+}
+tree(-7, -3, '#ff9fd2'); tree(-12, -14, '#9fe28f', 1.4); tree(14, -12, '#ffc46b', 1.2); tree(5, -22, '#c49bff', 1.6);
+
+// Casinha com janelas que acendem à noite.
+const windowMat = toon('#fff1b0', { emissive: '#ffcf6a', emissiveIntensity: 0 });
+{
+  const g = new THREE.Group();
+  const walls = new THREE.Mesh(new THREE.BoxGeometry(5, 3.6, 4.5), toon('#fff3e6'));
+  walls.position.y = 1.8; g.add(walls);
+  const roof = new THREE.Mesh(new THREE.ConeGeometry(4.3, 2.8, 4), toon('#ff7aa8'));
+  roof.position.y = 5; roof.rotation.y = Math.PI / 4; g.add(roof);
+  const door = new THREE.Mesh(new THREE.BoxGeometry(1.1, 1.9, 0.1), toon('#b07a55'));
+  door.position.set(0, 0.95, 2.27); g.add(door);
+  for (const s of [-1, 1]) {
+    const w = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.9, 0.1), windowMat);
+    w.position.set(s * 1.6, 1.9, 2.27); g.add(w);
+  }
+  eyesOn(g, 0, 2.75, 2.3, 0.35);
+  g.position.set(-6, 0, -9); g.rotation.y = 0.35;
+  world.add(enableShadows(g));
+}
+
+// "Quim" de mentirinha (só para escala e sombra).
+const quim = new THREE.Group();
+{
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.28, 0.45, 6, 12), toon('#ff8fc7'));
+  body.position.y = 0.55; quim.add(body);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.36, 20, 16), toon('#ffd9c2'));
+  head.position.y = 1.1; quim.add(head);
+  const hair = new THREE.Mesh(new THREE.SphereGeometry(0.42, 20, 16), toon('#5a3524'));
+  hair.position.set(0, 1.22, -0.08); hair.scale.set(1.1, 0.9, 1); quim.add(hair);
+  const e = createEyes({ size: 0.11, lashes: true }); e.position.set(0, 1.12, 0.32); quim.add(e);
+  quim.position.set(1.5, 0, 4); quim.rotation.y = 0.3;
+  world.add(enableShadows(quim));
+}
+
+// Flor gigante com olhos.
+{
+  const g = new THREE.Group();
+  const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.25, 4, 8), toon('#5fbf5a'));
+  stem.position.y = 2; g.add(stem);
+  const center = new THREE.Mesh(new THREE.SphereGeometry(0.9, 20, 16), toon('#ffd166'));
+  center.position.y = 4.4; center.scale.z = 0.5; g.add(center);
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2;
+    const p = new THREE.Mesh(new THREE.SphereGeometry(0.7, 14, 10), toon('#ff8fc7'));
+    p.position.set(Math.cos(a) * 1.3, 4.4 + Math.sin(a) * 1.3, -0.1); p.scale.set(1, 1, 0.3); g.add(p);
+  }
+  eyesOn(g, 0, 4.5, 0.42, 0.28);
+  g.position.set(5, 0, -3); g.rotation.y = -0.4;
+  world.add(enableShadows(g));
+}
+
+// Pedras e cogumelos para ver sombras de contato e AO.
+for (const [x, z, r] of [[3, 8, 0.8], [-3, 6, 0.5], [11, -4, 1.1]]) {
+  const m = new THREE.Mesh(new THREE.DodecahedronGeometry(r, 1), toon('#cfc3e0'));
+  m.position.set(x, r * 0.5, z); world.add(enableShadows(m));
+}
+
+// Vaga-lumes: cor acima de 1 (HDR) para brilhar no bloom à noite.
+const fireflyMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(3, 2.6, 0.9), transparent: true });
+const fireflies = [];
+for (let i = 0; i < 40; i++) {
+  const m = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 6), fireflyMat);
+  m.userData.p = [(Math.random() - 0.5) * 30, 0.6 + Math.random() * 2.5, (Math.random() - 0.5) * 24, Math.random() * 10];
+  world.add(m); fireflies.push(m);
+}
+
+// --- câmera de teste ------------------------------------------------------------------------------
+const cam = render.camera;
+let view = params.get('view') || 'cena';
+const look = new THREE.Vector3();
+function placeCamera(t) {
+  const a = (render.dayTime - 0.25) * Math.PI * 2;
+  if (view === 'sol' || view === 'lua') {
+    const dir = view === 'sol' ? render.sunDir.clone()
+      : new THREE.Vector3(-Math.cos(a), -Math.sin(a), 0.5).normalize();
+    cam.position.set(C.x, 2, C.z + 8);
+    look.copy(cam.position).addScaledVector(dir, 100);
+    if (dir.y < 0.12) look.y = cam.position.y + 12;
+  } else if (view === 'alto') {
+    cam.position.set(C.x + Math.cos(t * 0.05) * 40, 22, C.z + Math.sin(t * 0.05) * 40);
+    look.set(C.x, 2, C.z);
+  } else {
+    cam.position.set(C.x + 2, 4.2, C.z + 15);
+    look.set(C.x - 1, 2.2, C.z - 2);
+  }
+  cam.lookAt(look);
+}
+
+const clock = new THREE.Clock();
+let t = 0;
+const qpos = new THREE.Vector3();
+function frame() {
+  requestAnimationFrame(frame);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  t += dt;
+  if (!params.has('frozen')) render.update(dt);
+  const n = render.nightFactor;
+  windowMat.emissiveIntensity = 2.2 * n;
+  fireflyMat.opacity = n;
+  for (const f of fireflies) {
+    const [x, y, z, ph] = f.userData.p;
+    f.visible = n > 0.05;
+    f.position.set(x + Math.sin(t * 0.7 + ph) * 0.8, y + Math.sin(t * 1.3 + ph) * 0.4, z + Math.cos(t * 0.5 + ph) * 0.8);
+  }
+  quim.getWorldPosition(qpos);
+  render.shadowTarget.copy(qpos);
+  updateEyes(dt, cam.position, qpos, render.sleepiness);
+  if (!params.has('menu')) placeCamera(t);
+  render.render();
+  document.getElementById('info').textContent =
+    `dayTime ${render.dayTime.toFixed(3)} · ${render.timePhase()} · qualidade ${render.quality} · sono ${render.sleepiness.toFixed(2)}`;
+}
+
+if (params.has('menu')) render.setMenuMode(true);
+await render.warmup();
+frame();
+window.__game = {
+  ready: true, render, phases, state,
+  setView(v) { view = v; },
+  setSleepy(v) { for (const r of REGIONS) state.regionColor[r.id] = 1 - v; },
+};
+</script>
+</body>
+</html>

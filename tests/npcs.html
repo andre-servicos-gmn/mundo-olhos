@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Teste — moradores</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #2a2440; }
+  #info { position: fixed; left: 10px; top: 8px; font: 13px monospace; color: #fff; text-shadow: 0 1px 2px #000; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "../vendor/three/three.module.js", "three/addons/": "../vendor/three/addons/" } }
+</script>
+</head>
+<body>
+<div id="root"></div>
+<div id="info"></div>
+<script type="module">
+// Teste isolado do src/npcs: chão plano, todos os moradores em fila (9 por fileira), uma "Quim" de mentirinha.
+// URL: ?time=0.4&quality=media&still (sem passeio) &q=x,z (posição da Quim)
+// window.__game: setQ(x,z), cam(x,y,z,lx,ly,lz), portrait(id, ang, dist), jump(), npcs, game, row(i)
+import * as THREE from 'three';
+import { createBus } from '../src/core/bus.js';
+import { createInteractables } from '../src/core/interact.js';
+import { toon } from '../src/core/materials.js';
+import { REGIONS } from '../src/data/worldmap.js';
+import { createRender } from '../src/render/render.js';
+import { createNPCs } from '../src/npcs/npcs.js';
+
+const params = new URLSearchParams(location.search);
+const state = {
+  dayTime: Number(params.get('time') ?? 0.4),
+  regionColor: Object.fromEntries(REGIONS.map((r) => [r.id, 1])),
+  settings: { quality: params.get('quality') || 'media' },
+  flags: { pico_liberado: true },
+};
+const qpos = new THREE.Vector3(0, 0, 30);
+if (params.get('q')) { const [x, z] = params.get('q').split(',').map(Number); qpos.set(x, 0, z); }
+const dialogLog = [], murmurs = [];
+const game = {
+  THREE, params, state, bus: createBus(), interactables: createInteractables(), findables: new Set(),
+  paused: false, cinematic: false, time: { elapsed: 0 },
+  world: {
+    getHeight: () => 0, groundAt: () => ({ y: 0, surface: null }), resolveCollision() {}, isWater: () => false,
+    gateBlocked: () => null, regionAt: () => 'campo',
+  },
+  player: { position: qpos, lookAt(p) { this.looking = p; }, looking: null },
+  ui: { dialogue: (lines) => { dialogLog.push(...lines); game.bus.emit('dialogue:open'); return new Promise((r) => setTimeout(() => { game.bus.emit('dialogue:close'); r(); }, 60)); } },
+  audio: { murmur: (v, c) => murmurs.push(c) },
+  missions: { onTalk: async () => false },
+};
+
+const render = createRender(game, document.getElementById('root'));
+game.render = render;
+const scene = render.scene;
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(400, 400).rotateX(-Math.PI / 2), toon('#9ee07a'));
+ground.receiveShadow = true;
+scene.add(ground);
+// a "Quim" de mentirinha (só para referência de escala: 1,25 m)
+const quim = new THREE.Group();
+const qb = new THREE.Mesh(new THREE.CapsuleGeometry(0.22, 0.55, 4, 10), toon('#ffcd3c'));
+qb.position.y = 0.5; qb.castShadow = true;
+const qh = new THREE.Mesh(new THREE.SphereGeometry(0.3, 16, 12), toon('#5b3122'));
+qh.position.y = 1.0; qh.castShadow = true;
+quim.add(qb, qh);
+scene.add(quim);
+
+const npcs = createNPCs(game);
+game.npcs = npcs;
+const PER = 9, DX = 3.4, DZ = 5;
+const rowOf = (i) => Math.floor(i / PER);
+npcs.list.forEach((n, i) => {
+  if (params.has('still')) n.def.wander = 0;
+  const col = i % PER, r = rowOf(i);
+  npcs.place(n.id, (col - (PER - 1) / 2) * DX, -r * DZ);
+  n.yaw = 0;   // todo mundo de frente para a câmera
+});
+
+const cam = render.camera;
+let camSet = null;
+function setCam(x, y, z, lx, ly, lz) { camSet = { x, y, z, lx, ly, lz }; }
+setCam(0, 6, 22, 0, 1, -4);
+
+await render.warmup?.();
+const clock = new THREE.Clock();
+const info = document.getElementById('info');
+function frame() {
+  requestAnimationFrame(frame);
+  const dt = Math.min(clock.getDelta(), 1 / 20);
+  if (!window.__manual) tick(dt);
+  if (!window.__sheet) render.render();
+}
+function tick(dt) {
+  game.time.elapsed += dt;
+  render.update(dt);
+  render.shadowTarget?.copy(qpos);
+  npcs.update(dt);
+  quim.position.copy(qpos);
+  if (camSet) { cam.position.set(camSet.x, camSet.y, camSet.z); cam.lookAt(camSet.lx, camSet.ly, camSet.lz); }
+  const near = game.interactables.nearest(qpos);
+  info.textContent = `Quim ${qpos.x.toFixed(1)}, ${qpos.z.toFixed(1)} · perto: ${near ? near.label : '-'}`;
+}
+frame();
+
+window.__game = {
+  ready: true, game, npcs, render, dialogLog, murmurs, tick,
+  setQ(x, z) { qpos.set(x, 0, z); },
+  cam: setCam,
+  jump() { game.bus.emit('player:jump', {}); },
+  /** Câmera de retrato de um morador (ângulo em graus em volta dele, a partir da frente). */
+  portrait(id, ang = 0, dist = null, h = null) {
+    const n = npcs.get(id);
+    const top = n.rig.top * n.size;
+    const d = dist ?? Math.max(1.6, top * 2.1);
+    const a = n.yaw + ang * Math.PI / 180;
+    const p = n.position;
+    setCam(p.x + Math.sin(a) * d, p.y + (h ?? top * 0.75), p.z + Math.cos(a) * d, p.x, p.y + top * 0.55, p.z);
+  },
+  /** Folha de contato: retrato de vários moradores numa tela só (viewports com scissor). */
+  sheet(ids, cols = 4, ang = 20) {
+    window.__sheet = true;
+    const r = render.renderer;
+    const size = r.getSize(new THREE.Vector2());
+    const rows = Math.ceil(ids.length / cols), w = Math.floor(size.x / cols), hh = Math.floor(size.y / rows);
+    const c2 = cam.clone();
+    c2.aspect = w / hh;
+    c2.fov = 32;
+    c2.updateProjectionMatrix();
+    r.setScissorTest(true);
+    r.setClearColor('#cfe8ff');
+    ids.forEach((id, i) => {
+      const n = npcs.get(id);
+      const top = n.rig.top * n.size, p = n.position;
+      const d = top * 2.3 + 0.4, a = n.yaw + ang * Math.PI / 180;
+      c2.position.set(p.x + Math.sin(a) * d, p.y + top * 0.62, p.z + Math.cos(a) * d);
+      c2.lookAt(p.x, p.y + top * 0.5, p.z);
+      const x = (i % cols) * w, y = size.y - (Math.floor(i / cols) + 1) * hh;
+      r.setViewport(x, y, w, hh);
+      r.setScissor(x, y, w, hh);
+      r.clear();
+      r.render(scene, c2);
+    });
+    r.setScissorTest(false);
+    r.setViewport(0, 0, size.x, size.y);
+  },
+  row(r) {
+    const z = -r * DZ;
+    setCam(0, 3.2, z + 13, 0, 1.0, z);
+  },
+};
+</script>
+</body>
+</html>

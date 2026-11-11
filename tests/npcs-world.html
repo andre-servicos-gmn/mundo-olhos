@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Teste — moradores no mundo</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #2a2440; }
+  #hud { position: fixed; left: 10px; top: 8px; font: 13px monospace; color: #fff; text-shadow: 0 1px 2px #000; }
+  #prompt { position: fixed; left: 50%; bottom: 40px; transform: translateX(-50%); font: bold 18px sans-serif;
+    color: #5a2a50; background: #fff; border-radius: 20px; padding: 6px 16px; display: none; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "../vendor/three/three.module.js", "three/addons/": "../vendor/three/addons/" } }
+</script>
+</head>
+<body>
+<div id="root"></div>
+<div id="hud"></div>
+<div id="prompt"></div>
+<script type="module">
+// Integração: world real + Quim + câmera + moradores (UI/missões/áudio de mentirinha). WASD, Shift, Espaço, E, mouse.
+// URL: ?pos=x,z  ?time=0.4  ?quality=baixa|media|alta  ?color  ?flags=a,b
+import * as THREE from 'three';
+import { createBus } from '../src/core/bus.js';
+import { defaultState } from '../src/core/state.js';
+import { createInput } from '../src/core/input.js';
+import { createInteractables } from '../src/core/interact.js';
+import { createRender } from '../src/render/render.js';
+import { createWorld } from '../src/world/world.js';
+import { createPlayer } from '../src/player/player.js';
+import { createCameraRig } from '../src/player/camera.js';
+import { createNPCs } from '../src/npcs/npcs.js';
+
+const params = new URLSearchParams(location.search);
+const hud = document.getElementById('hud');
+const promptEl = document.getElementById('prompt');
+const state = defaultState();
+state.settings.quality = params.get('quality') || 'media';
+if (params.get('time')) state.dayTime = Number(params.get('time'));
+for (const f of (params.get('flags') || '').split(',').filter(Boolean)) state.flags[f] = true;
+const log = [];
+const game = {
+  THREE, params, bus: createBus(), state, interactables: createInteractables(), findables: new Set(),
+  paused: false, cinematic: false, time: { elapsed: 0 },
+  ui: {
+    toast: (t) => log.push('toast:' + t),
+    setPrompt(t) { promptEl.style.display = t ? 'block' : 'none'; promptEl.textContent = t || ''; },
+    dialogue(lines) {
+      log.push(...lines.map((l) => 'fala:' + l.speaker + ': ' + l.text));
+      game.bus.emit('dialogue:open', { lines });
+      return new Promise((r) => setTimeout(() => { game.bus.emit('dialogue:close'); r(); }, 50));
+    },
+  },
+  audio: { play: (n) => log.push('sfx:' + n), quimVoice: (n) => log.push('voz:' + n), murmur: (v, c) => log.push('murmur:' + c) },
+  missions: { onTalk: async () => false },
+};
+for (const ev of ['player:jump']) game.bus.on(ev, () => log.push(ev));
+game.render = createRender(game, document.getElementById('root'));
+game.render.setQuality(state.settings.quality);
+game.input = createInput(game.render.renderer.domElement);
+game.world = createWorld(game);
+await game.world.build((p, t) => { hud.textContent = `${Math.round(p * 100)}% ${t}`; });
+if (params.has('color')) for (const r of game.world.regionIds()) state.regionColor[r] = 1;
+const pos = params.get('pos');
+if (pos) { const [x, z] = pos.split(',').map(Number); state.player = { x, y: game.world.getHeight(x, z), z, rotY: 0 }; }
+game.world.applyState();
+game.render.dayTime = state.dayTime;
+game.player = createPlayer(game);
+game.cameraRig = createCameraRig(game);
+game.player.applyState();
+game.npcs = createNPCs(game);
+game.npcs.applyState();
+game.cameraRig.snap();
+await game.render.warmup?.();
+
+function tick(dt, keys = []) {
+  for (const k of keys) game.input.simulate(k, true);
+  game.time.elapsed += dt;
+  game.render.update(dt);
+  game.player.update(dt);
+  game.npcs.update(dt);
+  game.world.update(dt);
+  game.cameraRig.update(dt);
+  game.input.endFrame();
+}
+const clock = new THREE.Clock();
+function frame() {
+  requestAnimationFrame(frame);
+  const dt = Math.min(clock.getDelta(), 1 / 20);
+  if (!window.__manual) tick(dt);
+  game.render.render();
+  const p = game.player.position;
+  hud.textContent = `${game.player.state} · ${p.x.toFixed(1)}, ${p.y.toFixed(2)}, ${p.z.toFixed(1)} · ${game.world.regionAt(p.x, p.z) ?? '-'}`;
+}
+frame();
+/** Avança a simulação em passos fixos (para testes automatizados com FPS baixo). */
+function step(n, keys = [], dt = 1 / 30) {
+  for (let i = 0; i < n; i++) tick(dt, keys);
+  for (const k of keys) game.input.simulate(k, false);
+}
+window.__game = Object.assign(game, { ready: true, log, step });
+</script>
+</body>
+</html>

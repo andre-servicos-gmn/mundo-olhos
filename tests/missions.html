@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Teste — missões no mundo</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #2a2440; font-family: system-ui, sans-serif; }
+  #hud { position: fixed; left: 10px; top: 8px; font: 13px monospace; color: #fff; text-shadow: 0 1px 2px #000; white-space: pre; }
+  #dlg { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); width: min(720px, 90vw); background: #fff8fd;
+         border: 4px solid #ffb3d9; border-radius: 22px; padding: 14px 20px; color: #4a2b5c; font-size: 18px; display: none; box-shadow: 0 6px 0 #e58fbf; }
+  #dlg b { display: block; color: #c0569a; margin-bottom: 4px; }
+  #toasts { position: fixed; right: 12px; top: 12px; display: flex; flex-direction: column; gap: 6px; align-items: flex-end; }
+  .toast { background: #fff; border-radius: 14px; padding: 6px 12px; color: #5a3a6a; font-size: 14px; box-shadow: 0 3px 0 #d9b8ec; }
+  #banner { position: fixed; left: 50%; top: 18%; transform: translateX(-50%); text-align: center; color: #fff; text-shadow: 0 3px 8px #8a3a7a; display: none; }
+  #banner h1 { margin: 0; font-size: 42px; } #banner p { margin: 4px 0 0; font-size: 18px; }
+  #prompt { position: fixed; left: 50%; bottom: 150px; transform: translateX(-50%); background: #fff; border-radius: 12px; padding: 4px 12px; color: #5a3a6a; display: none; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "../vendor/three/three.module.js", "three/addons/": "../vendor/three/addons/" } }
+</script>
+</head>
+<body>
+<div id="root"></div>
+<div id="hud"></div>
+<div id="prompt"></div>
+<div id="dlg"><b></b><span></span></div>
+<div id="toasts"></div>
+<div id="banner"><h1></h1><p></p></div>
+<script type="module">
+// Integração das missões com o mundo real (world + Quim + câmera + Pinceso + moradores) e uma UI mínima de teste.
+// URL: ?pos=x,z  ?time=0.4  ?quality=baixa|media|alta  ?ate=<missionId> (deixa essa missão ativa: as anteriores
+// ficam concluídas)  ?prologue (toca o prólogo)  ?dlg=ms (tempo por fala; padrão 900)
+import * as THREE from 'three';
+import { createBus } from '../src/core/bus.js';
+import { defaultState } from '../src/core/state.js';
+import { createInput } from '../src/core/input.js';
+import { createInteractables } from '../src/core/interact.js';
+import { MISSIONS, CAST, NPCS } from '../src/data/story.js';
+import { SPOTS } from '../src/data/worldmap.js';
+import { createRender } from '../src/render/render.js';
+import { createWorld } from '../src/world/world.js';
+import { createPlayer } from '../src/player/player.js';
+import { createCameraRig } from '../src/player/camera.js';
+import { createPinceso } from '../src/pinceso/pinceso.js';
+import { createNPCs } from '../src/npcs/npcs.js';
+import { createMissions } from '../src/missions/missions.js';
+
+const params = new URLSearchParams(location.search);
+const $ = (id) => document.getElementById(id);
+const state = defaultState();
+state.settings.quality = params.get('quality') || 'media';
+state.dayTime = params.get('time') ? Number(params.get('time')) : 0.42;
+const lineMs = Number(params.get('dlg') || 900);
+
+// ---- ?ate=<id>: conclui o que vem antes na cadeia (requires) ----
+const byId = new Map(MISSIONS.map((m) => [m.id, m]));
+function finishChain(id, seen = new Set()) {
+  const m = byId.get(id);
+  if (!m || seen.has(id)) return;
+  seen.add(id);
+  for (const r of m.requires?.missions || []) { finishChain(r, seen); markDone(r); }
+  for (const f of m.requires?.flags || []) state.flags[f] = true;
+}
+function markDone(id) {
+  const m = byId.get(id);
+  if (state.missions[id]?.status === 'done') return;
+  state.missions[id] = { status: 'done', step: m.steps.length, progress: {} };
+  const rw = m.rewards || {};
+  if (rw.flag) state.flags[rw.flag] = true;
+  if (rw.color) state.regionColor[m.region] = Math.min(1, (state.regionColor[m.region] ?? 0) + rw.color);
+  state.jujubas += rw.jujubas ?? 0;
+  if (rw.accessory) state.accessories.owned[rw.accessory] = true;
+  if (id === 'filhote_sem_ninho') state.pincesoJoined = true;
+  if (id === 'alvorada') state.flags.pico_liberado = true;
+}
+if (params.get('ate')) finishChain(params.get('ate'));
+
+// ---- UI mínima ----
+const log = { lines: [], toasts: [], banners: [], completes: [] };
+const nameOf = (sp) => CAST[sp]?.name ?? NPCS.find((n) => n.id === sp)?.name ?? sp;
+let blocking = false;
+const ui = {
+  async dialogue(lines) {
+    blocking = true; game.input.enabled = false;
+    for (const l of lines) {
+      log.lines.push(`${l.speaker}: ${l.text}`);
+      $('dlg').style.display = 'block';
+      $('dlg').querySelector('b').textContent = nameOf(l.speaker) || '';
+      $('dlg').querySelector('span').textContent = l.text;
+      await new Promise((r) => setTimeout(r, lineMs));
+    }
+    $('dlg').style.display = 'none';
+    blocking = false; game.input.enabled = true;
+  },
+  toast(t, icon = '') {
+    log.toasts.push(t);
+    const d = document.createElement('div'); d.className = 'toast'; d.textContent = `${icon} ${t}`;
+    $('toasts').prepend(d); setTimeout(() => d.remove(), 3500);
+  },
+  banner(t, s) { log.banners.push(t); $('banner').style.display = 'block'; $('banner').querySelector('h1').textContent = t; $('banner').querySelector('p').textContent = s || ''; clearTimeout(ui._bt); ui._bt = setTimeout(() => { $('banner').style.display = 'none'; }, 3000); },
+  missionComplete(m) { log.completes.push(m.id); ui.banner('Missão concluída!', m.title); },
+  setPrompt(t) { $('prompt').style.display = t ? 'block' : 'none'; $('prompt').textContent = t || ''; },
+  choice: () => Promise.resolve(0),
+  fade: () => Promise.resolve(),
+  openCafe: (menu) => new Promise((r) => setTimeout(() => r(menu.find((d) => d.affordable)?.id ?? null), 1500)),
+  openShop: () => Promise.resolve(null),
+  minigameCoral: () => new Promise((r) => setTimeout(() => r(true), 800)),
+  isBlocking: () => blocking,
+};
+
+const game = {
+  THREE, params, debug: true, bus: createBus(), state, interactables: createInteractables(), findables: new Set(),
+  paused: false, cinematic: false, time: { elapsed: 0 }, ui,
+  audio: { play() {}, quimVoice() {}, pincesoVoice() {}, setMusic() {}, note() {}, murmur() {} },
+};
+game.render = createRender(game, $('root'));
+game.render.setQuality(state.settings.quality);
+game.input = createInput(game.render.renderer.domElement);
+game.world = createWorld(game);
+await game.world.build((p, t) => { $('hud').textContent = `${Math.round(p * 100)}% ${t}`; });
+const pos = params.get('pos');
+if (pos) { const [x, z] = pos.split(',').map(Number); state.player = { x, y: game.world.getHeight(x, z), z, rotY: 0 }; }
+game.player = createPlayer(game);
+game.cameraRig = createCameraRig(game);
+game.pinceso = createPinceso(game);
+game.npcs = createNPCs(game);
+game.missions = createMissions(game);
+
+game.render.dayTime = state.dayTime;
+game.world.applyState();
+game.player.applyState();
+game.pinceso.applyState();
+game.npcs.applyState();
+game.missions.applyState();
+game.cameraRig.snap();
+await game.render.warmup?.();
+
+const clock = new THREE.Clock();
+function step(dt) {
+  game.time.elapsed += dt;
+  game.render.update(dt);
+  game.player.update(dt);
+  game.pinceso.update(dt);
+  game.npcs.update(dt);
+  game.world.update(dt);
+  game.missions.update(dt);
+}
+function frame() {
+  requestAnimationFrame(frame);
+  const dt = Math.min(clock.getDelta(), 1 / 20);
+  if (!window.__manual) step(dt);
+  game.cameraRig.update(dt);
+  game.render.render();
+  game.input.endFrame();
+  const tr = game.missions.tracked();
+  const t = game.missions.markerTarget();
+  const p = game.player.position;
+  $('hud').textContent = [
+    `Quim ${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)}  hora ${game.render.dayTime.toFixed(2)}  jujubas ${state.jujubas}`,
+    tr ? `▶ ${tr.mission.title} [${tr.stepIndex}:${tr.step.type}] ${tr.hint}${tr.progress ? `  (${tr.progress.have}/${tr.progress.need})` : ''}` : '— sem missão —',
+    t ? `alvo ${t.x.toFixed(1)}, ${t.y.toFixed(1)}, ${t.z.toFixed(1)}  dist ${Math.hypot(t.x - p.x, t.z - p.z).toFixed(1)}` : '',
+    `pinceso ${game.pinceso.mode}  carregando ${game.player.carrying?.name ?? '-'}`,
+  ].join('\n');
+}
+frame();
+if (params.has('prologue')) game.missions.playPrologue();
+window.__game = Object.assign(game, { ready: true, step, log, SPOTS });
+</script>
+</body>
+</html>

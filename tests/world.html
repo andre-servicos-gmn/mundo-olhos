@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mundo Olhos — teste do mundo</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #2a1840; font: 13px sans-serif; }
+  #hud { position: fixed; left: 10px; top: 10px; color: #fff; background: rgba(40, 20, 60, .6); padding: 6px 10px; border-radius: 10px; white-space: pre; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "../vendor/three/three.module.js", "three/addons/": "../vendor/three/addons/" } }
+</script>
+</head>
+<body>
+<div id="root"></div>
+<div id="hud">carregando...</div>
+<script type="module">
+// Página de teste isolada do world: câmera livre (WASD + Q/E sobe/desce, arrastar = girar, Shift = rápido),
+// render real (src/render), sem player/NPCs/missões. Parâmetros: ?cam=x,y,z,lx,ly,lz  ?pos=x,z (jogador fictício)
+// ?time=0.5  ?color (tudo colorido)  ?quality=baixa|media|alta  ?flags=a,b
+import * as THREE from 'three';
+import { createBus } from '../src/core/bus.js';
+import { defaultState } from '../src/core/state.js';
+import { createInteractables } from '../src/core/interact.js';
+import { createRender } from '../src/render/render.js';
+import { createWorld } from '../src/world/world.js';
+import { SPAWN } from '../src/data/worldmap.js';
+
+const params = new URLSearchParams(location.search);
+const hud = document.getElementById('hud');
+const state = defaultState();
+state.settings.quality = params.get('quality') || 'media';
+if (params.get('time')) state.dayTime = Number(params.get('time'));
+for (const f of (params.get('flags') || '').split(',').filter(Boolean)) state.flags[f] = true;
+const events = [];
+const game = {
+  THREE, params, bus: createBus(), state, interactables: createInteractables(), findables: new Set(),
+  paused: false, cinematic: false, time: { elapsed: 0 },
+  ui: { toast: (t) => { events.push(['toast', t]); console.log('[toast]', t); } },
+  audio: { play: (n) => events.push(['audio', n]) },
+};
+for (const ev of ['region:enter', 'jujuba:collect', 'color:restore']) game.bus.on(ev, (p) => events.push([ev, p]));
+game.render = createRender(game, document.getElementById('root'));
+game.render.setQuality(state.settings.quality);
+const t0 = performance.now();
+game.world = createWorld(game);
+await game.world.build((p, t) => { hud.textContent = `${Math.round(p * 100)}% ${t}`; });
+const buildMs = Math.round(performance.now() - t0);
+if (params.has('color')) for (const r of game.world.regionIds()) state.regionColor[r] = 1;
+game.world.applyState();
+game.render.dayTime = state.dayTime;
+
+// jogador fictício (para olhos, jujubas e região)
+const [px, pz] = (params.get('pos') || `${SPAWN.x},${SPAWN.z}`).split(',').map(Number);
+const player = { position: new THREE.Vector3(px, game.world.getHeight(px, pz), pz) };
+if (params.has('pos')) game.player = player;
+
+const cam = game.render.camera;
+function view(x, y, z, lx, ly, lz) { cam.position.set(x, y, z); cam.lookAt(lx, ly, lz); }
+const c = (params.get('cam') || `${SPAWN.x},${game.world.getHeight(SPAWN.x, SPAWN.z) + 3},${SPAWN.z + 9},0,6,150`).split(',').map(Number);
+view(...c);
+
+// câmera livre
+const keys = new Set();
+addEventListener('keydown', (e) => keys.add(e.code));
+addEventListener('keyup', (e) => keys.delete(e.code));
+let drag = false;
+addEventListener('mousedown', () => { drag = true; });
+addEventListener('mouseup', () => { drag = false; });
+const eul = new THREE.Euler(0, 0, 0, 'YXZ');
+addEventListener('mousemove', (e) => {
+  if (!drag) return;
+  eul.setFromQuaternion(cam.quaternion);
+  eul.y -= e.movementX * 0.004; eul.x = Math.max(-1.5, Math.min(1.5, eul.x - e.movementY * 0.004));
+  cam.quaternion.setFromEuler(eul);
+});
+const clock = new THREE.Clock();
+let frames = 0, fpsT = 0, fps = 0;
+const fwd = new THREE.Vector3(), right = new THREE.Vector3();
+function frame() {
+  requestAnimationFrame(frame);
+  const dt = Math.min(clock.getDelta(), 1 / 20);
+  const sp = (keys.has('ShiftLeft') ? 60 : 15) * dt;
+  cam.getWorldDirection(fwd); right.crossVectors(fwd, cam.up).normalize();
+  if (keys.has('KeyW')) cam.position.addScaledVector(fwd, sp);
+  if (keys.has('KeyS')) cam.position.addScaledVector(fwd, -sp);
+  if (keys.has('KeyD')) cam.position.addScaledVector(right, sp);
+  if (keys.has('KeyA')) cam.position.addScaledVector(right, -sp);
+  if (keys.has('KeyE')) cam.position.y += sp;
+  if (keys.has('KeyQ')) cam.position.y -= sp;
+  if (game.player) game.render.shadowTarget.copy(player.position);
+  else game.render.shadowTarget.set(cam.position.x, game.world.getHeight(cam.position.x, cam.position.z), cam.position.z).addScaledVector(fwd.setY(0).normalize(), 20);
+  game.time.elapsed += dt;
+  game.render.update(dt);
+  game.world.update(dt);
+  game.render.render();
+  frames++; fpsT += dt;
+  if (fpsT > 1) { fps = frames / fpsT; frames = 0; fpsT = 0; }
+  const info = game.render.renderer.info.render;
+  hud.textContent = `fps ${fps.toFixed(1)} | draw ${info.calls} | tris ${(info.triangles / 1000).toFixed(0)}k | build ${buildMs} ms\n` +
+    `cam ${cam.position.x.toFixed(0)},${cam.position.y.toFixed(0)},${cam.position.z.toFixed(0)} | região ${game.world.regionAt(cam.position.x, cam.position.z) ?? '-'}`;
+}
+frame();
+
+window.__game = {
+  ready: true, ...game, world: game.world, render: game.render, events, buildMs, view, player,
+  setPlayer(x, z, y) { player.position.set(x, y ?? game.world.getHeight(x, z), z); game.player = player; },
+  /** avança n quadros de simulação de dt segundos (o rAF do headless é lento) */
+  step(n = 1, dt = 1 / 30) { for (let i = 0; i < n; i++) { game.render.update(dt); game.world.update(dt); } game.render.render(); },
+  info: () => ({ ...game.render.renderer.info.render, programs: game.render.renderer.info.programs?.length, geometries: game.render.renderer.info.memory.geometries }),
+};
+</script>
+</body>
+</html>

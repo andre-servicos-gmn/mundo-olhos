@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Teste — player</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #2a2440; }
+  #info { position: fixed; left: 10px; top: 8px; font: 13px monospace; color: #fff; text-shadow: 0 1px 2px #000; }
+  #prompt { position: fixed; left: 50%; bottom: 40px; transform: translateX(-50%); font: bold 18px sans-serif;
+    color: #5a2a50; background: #fff; border-radius: 20px; padding: 6px 16px; display: none; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "../vendor/three/three.module.js", "three/addons/": "../vendor/three/addons/" } }
+</script>
+</head>
+<body>
+<div id="root"></div>
+<div id="info"></div>
+<div id="prompt"></div>
+<script type="module">
+// Teste isolado do src/player: chão plano + morrinho, plataformas, trampolim, lago e um pilar.
+// URL: ?time=0.4&quality=media&acc=laco&pinceso&mood=feliz
+import * as THREE from 'three';
+import { createBus } from '../src/core/bus.js';
+import { createInput } from '../src/core/input.js';
+import { createInteractables } from '../src/core/interact.js';
+import { toon, enableShadows } from '../src/core/materials.js';
+import { createEyes, registerEyes, updateEyes } from '../src/core/eyes.js';
+import { REGIONS } from '../src/data/worldmap.js';
+import { createRender } from '../src/render/render.js';
+import { createPlayer } from '../src/player/player.js';
+import { createCameraRig } from '../src/player/camera.js';
+
+const params = new URLSearchParams(location.search);
+const state = {
+  dayTime: Number(params.get('time') ?? 0.4),
+  regionColor: Object.fromEntries(REGIONS.map((r) => [r.id, 1])),
+  settings: { quality: params.get('quality') || 'media' },
+  player: { x: 0, y: 0, z: 0.01, rotY: 0 },
+  pincesoJoined: params.has('pinceso'),
+  accessories: { owned: {}, equipped: params.get('acc') || null },
+};
+
+// --- mundo de mentirinha -------------------------------------------------------------------------
+const hill = (x, z) => { const d = Math.hypot(x - 14, z + 12); return d < 9 ? 2.2 * (0.5 + 0.5 * Math.cos(Math.PI * d / 9)) : 0; };
+const PLATS = [
+  { x: -5, z: -6, y: 0.9, r: 1.6 },
+  { x: -8, z: -9, y: 2.1, r: 1.5 },
+  { x: -11, z: -12, y: 3.3, r: 1.5 },
+  { x: 4, z: -8, y: 0.6, r: 1.3, bounce: 2.2 },     // trampolim
+  { x: 4, z: -14, y: 4.6, r: 2.2 },
+];
+const POND = { x: 7, z: 6, r: 4 };
+const PILLAR = { x: -4, z: 5, r: 1 };
+const world = {
+  getHeight: (x, z) => hill(x, z),
+  groundAt(x, z, y) {
+    let best = { y: hill(x, z), surface: null };
+    for (const p of PLATS) {
+      if (Math.hypot(x - p.x, z - p.z) <= p.r && p.y <= y + 0.6 && p.y > best.y) best = { y: p.y, surface: p, bounce: p.bounce };
+    }
+    return best;
+  },
+  resolveCollision(pos, radius) {
+    const dx = pos.x - PILLAR.x, dz = pos.z - PILLAR.z, d = Math.hypot(dx, dz), min = PILLAR.r + radius;
+    if (d < min && d > 1e-6) { pos.x = PILLAR.x + dx / d * min; pos.z = PILLAR.z + dz / d * min; }
+    // como o world real: o miolo do lago é fundo e devolve para a margem; a beirada é rasinha
+    const lx = pos.x - POND.x, lz = pos.z - POND.z, ld = Math.hypot(lx, lz), inner = POND.r - 1.6;
+    if (ld < inner && ld > 1e-6) { pos.x = POND.x + lx / ld * inner; pos.z = POND.z + lz / ld * inner; }
+  },
+  isWater: (x, z) => Math.hypot(x - POND.x, z - POND.z) < POND.r - 0.6,
+  gateBlocked: () => null,
+  regionAt: () => 'campo',
+};
+
+const promptEl = document.getElementById('prompt');
+const audioLog = [];
+const toasts = [];
+const game = {
+  THREE, params, state, bus: createBus(), world,
+  interactables: createInteractables(), findables: new Set(),
+  paused: false, cinematic: false, time: { elapsed: 0 },
+  ui: {
+    setPrompt(t) { promptEl.style.display = t ? 'block' : 'none'; promptEl.textContent = t || ''; },
+    toast(t) { toasts.push(t); },
+  },
+  audio: {
+    play: (n) => audioLog.push('sfx:' + n),
+    quimVoice: (n) => audioLog.push('voz:' + n),
+  },
+};
+const events = [];
+for (const ev of ['player:jump', 'player:land']) game.bus.on(ev, (p) => events.push(ev + (p.bounce ? ':bounce' : '')));
+
+const render = createRender(game, document.getElementById('root'));
+game.render = render;
+game.input = createInput(render.renderer.domElement);
+const scene = render.scene;
+
+// cenário
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(160, 160, 80, 80).rotateX(-Math.PI / 2), toon('#9ee07a'));
+{
+  const pa = ground.geometry.attributes.position;
+  for (let i = 0; i < pa.count; i++) pa.setY(i, hill(pa.getX(i), pa.getZ(i)));
+  ground.geometry.computeVertexNormals();
+}
+ground.receiveShadow = true;
+scene.add(ground);
+const pond = new THREE.Mesh(new THREE.CircleGeometry(POND.r, 40).rotateX(-Math.PI / 2), toon('#7fd0ff', { emissive: '#3a8fd0', emissiveIntensity: 0.25 }));
+pond.position.set(POND.x, 0.03, POND.z);
+scene.add(pond);
+for (const p of PLATS) {
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(p.r, p.r * 0.9, 0.4, 24), toon(p.bounce ? '#ff9fd2' : '#d9b48a'));
+  m.position.set(p.x, p.y - 0.2, p.z);
+  scene.add(enableShadows(m));
+  if (p.y > 1) {
+    const s = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.2, p.y - 0.4, 8), toon('#a7764f'));
+    s.position.set(p.x, (p.y - 0.4) / 2, p.z);
+    scene.add(enableShadows(s));
+  }
+}
+{
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(PILLAR.r, PILLAR.r, 4, 20), toon('#c9a6ff'));
+  m.position.set(PILLAR.x, 2, PILLAR.z);
+  const e = createEyes({ size: 0.3, lashes: true });
+  e.position.set(0, 1, PILLAR.r * 0.95);
+  m.add(e); registerEyes(e);
+  scene.add(enableShadows(m));
+}
+// flores para dar escala
+for (let i = 0; i < 40; i++) {
+  const x = (Math.sin(i * 12.9898) * 43758.5453 % 1) * 30, z = (Math.sin(i * 78.233) * 12345.678 % 1) * 30;
+  const f = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 6), toon(['#ff8fc7', '#ffd166', '#c49bff'][i % 3]));
+  f.position.set(x, hill(x, z) + 0.15, z);
+  scene.add(f);
+}
+// placa interagível
+const sign = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.6, 0.1), toon('#f3d9a4'));
+sign.position.set(2.5, 1, 2.5);
+scene.add(enableShadows(sign));
+let interacted = 0;
+game.interactables.add({ id: 'placa', label: 'Ler a placa', radius: 2.2, getPosition: () => ({ x: 2.5, y: 0, z: 2.5 }), onInteract: () => { interacted++; } });
+
+game.player = createPlayer(game);
+game.cameraRig = createCameraRig(game);
+game.player.applyState();
+if (params.get('mood')) game.player.setMood(params.get('mood'));
+game.cameraRig.snap();
+await render.warmup?.();
+
+const clock = new THREE.Clock();
+const info = document.getElementById('info');
+function frame() {
+  requestAnimationFrame(frame);
+  const dt = Math.min(clock.getDelta(), 1 / 20);
+  if (!game.paused && !window.__manual) {   // __manual: o script do teste avança a simulação sozinho
+    game.time.elapsed += dt;
+    render.update(dt);
+    game.player.update(dt);
+    updateEyes(dt, game.player.position, game.player.position, 0);
+  }
+  if (!window.__manual) game.cameraRig.update(dt);
+  render.render();
+  game.input.endFrame();
+  const p = game.player.position;
+  info.textContent = `${game.player.state} · pos ${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)} · chão ${game.player.onGround}`;
+}
+frame();
+
+// Câmera de retrato (para screenshots de perto): ângulo em graus ao redor da Quim.
+function portrait(angleDeg = 0, dist = 2.6, h = 0.95, lookH = 0.75) {
+  const p = game.player.position, a = game.player.rotY + angleDeg * Math.PI / 180;
+  game.cameraRig.setCinematic({ x: p.x + Math.sin(a) * dist, y: p.y + h, z: p.z + Math.cos(a) * dist, lookX: p.x, lookY: p.y + lookH, lookZ: p.z }, 0);
+}
+window.__game = {
+  ready: true, THREE, render, state, player: game.player, cameraRig: game.cameraRig, input: game.input, bus: game.bus,
+  game, audioLog, events, toasts, portrait, get interacted() { return interacted; },
+};
+</script>
+</body>
+</html>

@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Mapa — visão de cima</title>
+<style>
+  html, body { margin: 0; background: #2a2440; }
+  canvas { display: block; margin: 0 auto; }
+</style>
+</head>
+<body>
+<canvas id="c" width="1280" height="1280"></canvas>
+<script type="module">
+// Teste visual do src/data/worldmap.js: desenha regiões, trilhas, água, landmarks, plataformas e jujubas.
+import { WORLD, SPAWN, REGIONS, PATHS, LANDMARKS, PLATFORMS, WATER, JUJUBA_SPOTS, GATES } from '../src/data/worldmap.js';
+
+const cv = document.getElementById('c');
+const g = cv.getContext('2d');
+const S = cv.width / (WORLD.half * 2);
+const X = (x) => (x + WORLD.half) * S, Z = (z) => (z + WORLD.half) * S;
+
+g.fillStyle = '#3b3557'; g.fillRect(0, 0, cv.width, cv.height);
+g.fillStyle = '#4a7a50'; g.beginPath(); g.arc(X(0), Z(0), WORLD.playRadius * S, 0, Math.PI * 2); g.fill();
+for (const r of REGIONS) {
+  g.fillStyle = r.palette.ground; g.globalAlpha = 0.85;
+  g.beginPath(); g.arc(X(r.center.x), Z(r.center.z), r.radius * S, 0, Math.PI * 2); g.fill();
+}
+g.globalAlpha = 1;
+for (const gt of GATES) {
+  g.strokeStyle = '#ffffff'; g.setLineDash([6, 6]); g.lineWidth = 2;
+  g.beginPath(); g.arc(X(gt.x), Z(gt.z), gt.radius * S, 0, Math.PI * 2); g.stroke(); g.setLineDash([]);
+}
+for (const w of WATER) {
+  g.fillStyle = w.data?.calda ? '#ff8fbf' : '#5ab8ff'; g.strokeStyle = g.fillStyle;
+  if (w.type === 'rio') {
+    g.lineWidth = w.width * S; g.lineCap = 'round'; g.lineJoin = 'round';
+    g.beginPath(); w.points.forEach(([x, z], i) => (i ? g.lineTo(X(x), Z(z)) : g.moveTo(X(x), Z(z)))); g.stroke();
+  } else { g.beginPath(); g.arc(X(w.x), Z(w.z), w.radius * S, 0, Math.PI * 2); g.fill(); }
+}
+for (const p of PATHS) {
+  g.strokeStyle = p.secret ? '#ffe9a8' : '#f6dcae'; g.lineWidth = p.width * S; g.lineCap = 'round'; g.lineJoin = 'round';
+  if (p.secret) g.setLineDash([4, 5]);
+  g.beginPath(); p.points.forEach(([x, z], i) => (i ? g.lineTo(X(x), Z(z)) : g.moveTo(X(x), Z(z)))); g.stroke();
+  g.setLineDash([]);
+}
+const COL = { casa: '#ff7aa8', casa_quim: '#ff3d7f', cafeteria: '#ffffff', loja_acessorios: '#c792ff', arvore_gigante: '#2f6b3a',
+  arvore_algodao: '#ff9fd2', poste: '#222', placa: '#8b5a2b', banco: '#a0522d', ponte: '#8b5a2b', torre_relogio: '#fff',
+  moinho: '#fff', flor_gigante: '#ffd23f', pirulito_gigante: '#ff4fa0', horta: '#6b8e23', jardim: '#ff8fc7' };
+for (const l of LANDMARKS) {
+  const r = l.type === 'arvore_gigante' ? l.data.trunkRadius : l.type === 'praca' ? 12 * (l.scale ?? 1) : ({ casa: 5, cafeteria: 7, loja_acessorios: 6, casa_quim: 6, moinho: 5, horta: 4, jardim: 5, torre_relogio: 5, coreto: 5, mirante: 4, fonte: 5 }[l.type] ?? 1.2) * (l.scale ?? 1);
+  g.fillStyle = COL[l.type] || '#ffe08a'; g.globalAlpha = l.type === 'praca' ? 0.35 : 1;
+  g.beginPath(); g.arc(X(l.x), Z(l.z), Math.max(1.5, r * S), 0, Math.PI * 2); g.fill();
+  g.globalAlpha = 1;
+  if (l.rotY !== undefined && r > 2) { // frente
+    g.strokeStyle = '#000'; g.lineWidth = 1.5; g.beginPath(); g.moveTo(X(l.x), Z(l.z));
+    g.lineTo(X(l.x + Math.sin(l.rotY) * r * 1.4), Z(l.z + Math.cos(l.rotY) * r * 1.4)); g.stroke();
+  }
+}
+for (const p of PLATFORMS) {
+  g.fillStyle = p.bounce ? '#ff5e5e' : '#c08bff'; g.globalAlpha = 0.85;
+  if (p.w) {
+    g.save(); g.translate(X(p.x), Z(p.z)); g.rotate(-p.rotY); g.fillRect(-p.w / 2 * S, -p.d / 2 * S, p.w * S, p.d * S); g.restore();
+  } else { g.beginPath(); g.arc(X(p.x), Z(p.z), p.radius * S, 0, Math.PI * 2); g.fill(); }
+}
+g.globalAlpha = 1;
+for (const j of JUJUBA_SPOTS) { g.fillStyle = j.color; g.fillRect(X(j.x) - 1.5, Z(j.z) - 1.5, 3, 3); }
+g.fillStyle = '#fff'; g.beginPath(); g.arc(X(SPAWN.x), Z(SPAWN.z), 4, 0, Math.PI * 2); g.fill();
+g.font = 'bold 15px sans-serif'; g.textAlign = 'center';
+for (const r of REGIONS) { g.fillStyle = '#1d1430'; g.fillText(r.name, X(r.center.x), Z(r.center.z - r.radius + 12)); }
+window.__game = { ready: true };
+</script>
+</body>
+</html>

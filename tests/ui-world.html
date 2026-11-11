@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Teste — UI no mundo real</title>
+<link rel="stylesheet" href="../css/style.css">
+<script type="importmap">
+{ "imports": { "three": "../vendor/three/three.module.js", "three/addons/": "../vendor/three/addons/" } }
+</script>
+</head>
+<body>
+<div id="game-root"></div>
+<div id="ui-root"></div>
+<script type="module">
+// Integração da UI de verdade com todos os sistemas reais (mesma ordem do src/main.js), trocando só o áudio
+// por um stub (enquanto src/audio não existe). URL: os mesmos parâmetros do jogo (?skip ?noprologue ?pos ?time
+// ?pinceso ?color ?flags) + ?menu (mostra o menu principal antes) e ?ate=<missionId> (missões anteriores concluídas).
+import * as THREE from 'three';
+import { createBus } from '../src/core/bus.js';
+import { defaultState } from '../src/core/state.js';
+import { createInput } from '../src/core/input.js';
+import { createInteractables } from '../src/core/interact.js';
+import { nextFrame } from '../src/core/util.js';
+import { MISSIONS } from '../src/data/story.js';
+import { createRender } from '../src/render/render.js';
+import { createWorld } from '../src/world/world.js';
+import { createPlayer } from '../src/player/player.js';
+import { createCameraRig } from '../src/player/camera.js';
+import { createPinceso } from '../src/pinceso/pinceso.js';
+import { createNPCs } from '../src/npcs/npcs.js';
+import { createMissions } from '../src/missions/missions.js';
+import { createUI } from '../src/ui/ui.js';
+
+const params = new URLSearchParams(location.search);
+const audioLog = [];
+const audio = {
+  init() {}, setVolumes() {}, update() {}, play(n) { audioLog.push(n); }, murmur() {}, quimVoice() {}, pincesoVoice() {},
+  setMusic() {}, note(i) { audioLog.push('note' + i); },
+};
+const state = defaultState();
+const byId = new Map(MISSIONS.map((m) => [m.id, m]));
+function finishChain(id, seen = new Set()) {
+  const m = byId.get(id);
+  if (!m || seen.has(id)) return;
+  seen.add(id);
+  for (const r of m.requires?.missions || []) {
+    finishChain(r, seen);
+    const mm = byId.get(r);
+    state.missions[r] = { status: 'done', step: mm.steps.length, progress: {} };
+    const rw = mm.rewards || {};
+    if (rw.flag) state.flags[rw.flag] = true;
+    if (rw.color) state.regionColor[mm.region] = Math.min(1, (state.regionColor[mm.region] ?? 0) + rw.color);
+    state.jujubas += rw.jujubas ?? 0;
+    if (rw.accessory) state.accessories.owned[rw.accessory] = true;
+    if (r === 'filhote_sem_ninho') state.pincesoJoined = true;
+    state.discoveredRegions[mm.region] = true;
+  }
+}
+if (params.get('ate')) finishChain(params.get('ate'));
+
+const game = {
+  THREE, debug: true, params, bus: createBus(), state, interactables: createInteractables(), findables: new Set(),
+  paused: true, cinematic: false, time: { elapsed: 0 }, audioLog,
+};
+if (params.get('quality')) state.settings.quality = params.get('quality');
+game.ui = createUI(game, document.getElementById('ui-root'));
+game.ui.showLoading(0, 'Acordando o Mundo Olhos...');
+await nextFrame();
+game.audio = audio;
+game.render = createRender(game, document.getElementById('game-root'));
+game.input = createInput(game.render.renderer.domElement);
+game.ui.attachInput(game.input);
+game.world = createWorld(game);
+await game.world.build((p, text) => game.ui.showLoading(0.05 + p * 0.75, text));
+game.ui.showLoading(0.82, 'Penteando os cachinhos da Quim...');
+await nextFrame();
+game.player = createPlayer(game);
+game.cameraRig = createCameraRig(game);
+game.pinceso = createPinceso(game);
+game.ui.showLoading(0.9, 'Chamando os moradores...');
+await nextFrame();
+game.npcs = createNPCs(game);
+game.missions = createMissions(game);
+game.ui.showLoading(1, 'Pronto!');
+await game.render.warmup?.();
+game.ui.hideLoading();
+if (params.has('menu')) {
+  game.render.setMenuMode?.(true);
+  await game.ui.showMenu({ hasSave: false });
+  game.render.setMenuMode?.(false);
+}
+const pos = params.get('pos');
+if (pos) { const [x, z] = pos.split(',').map(Number); state.player = { x, y: game.world.getHeight(x, z), z, rotY: 0 }; }
+if (params.get('time')) state.dayTime = Number(params.get('time'));
+for (const f of (params.get('flags') || '').split(',').filter(Boolean)) state.flags[f] = true;
+if (params.has('pinceso')) state.pincesoJoined = true;
+if (params.has('color')) for (const r of game.world.regionIds()) state.regionColor[r] = 1;
+
+game.render.setQuality(state.settings.quality);
+game.render.dayTime = state.dayTime;
+game.world.applyState();
+game.player.applyState();
+game.pinceso.applyState();
+game.npcs.applyState();
+game.missions.applyState();
+game.cameraRig.snap();
+game.paused = false;
+game.bus.emit('session:start', { isNew: true });
+if (!params.has('noprologue')) game.missions.playPrologue();
+
+const clock = new THREE.Clock();
+function frame() {
+  requestAnimationFrame(frame);
+  const dt = Math.min(clock.getDelta(), 1 / 20);
+  game.ui.update(dt);
+  if (!game.paused) {
+    game.time.elapsed += dt;
+    game.render.update(dt);
+    game.player.update(dt);
+    game.pinceso.update(dt);
+    game.npcs.update(dt);
+    game.world.update(dt);
+    game.missions.update(dt);
+  }
+  game.cameraRig.update(dt);
+  game.render.render();
+  game.input.endFrame();
+}
+frame();
+window.__game = game;
+game.ready = true;
+</script>
+</body>
+</html>

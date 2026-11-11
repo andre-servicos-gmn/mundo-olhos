@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Teste — pinceso</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #2a2440; }
+  #info { position: fixed; left: 10px; top: 8px; font: 13px monospace; color: #fff; text-shadow: 0 1px 2px #000; white-space: pre; }
+  #toast { position: fixed; left: 50%; top: 20px; transform: translateX(-50%); font: bold 16px sans-serif; color: #5a2a50;
+    background: #fff; border-radius: 16px; padding: 6px 14px; display: none; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "../vendor/three/three.module.js", "three/addons/": "../vendor/three/addons/" } }
+</script>
+</head>
+<body>
+<div id="root"></div>
+<div id="info"></div>
+<div id="toast"></div>
+<script type="module">
+// Teste isolado do src/pinceso com a Quim de verdade (src/player) e um mundo de mentirinha.
+// URL: ?time=0.4&quality=media&mode=follow|trapped|fleeing|perched|cafe&acc=chapeu
+// Teclas: WASD/Shift/Espaço (Quim), Q (Voo de Busca), 1..5 trocam o modo do Pinceso, J = join(), C = missão completa.
+import * as THREE from 'three';
+import { createBus } from '../src/core/bus.js';
+import { createInput } from '../src/core/input.js';
+import { createInteractables } from '../src/core/interact.js';
+import { toon, enableShadows } from '../src/core/materials.js';
+import { createEyes, registerEyes, updateEyes } from '../src/core/eyes.js';
+import { REGIONS } from '../src/data/worldmap.js';
+import { createRender } from '../src/render/render.js';
+import { createPlayer } from '../src/player/player.js';
+import { createCameraRig } from '../src/player/camera.js';
+import { createPinceso } from '../src/pinceso/pinceso.js';
+
+const params = new URLSearchParams(location.search);
+const state = {
+  dayTime: Number(params.get('time') ?? 0.4),
+  regionColor: Object.fromEntries(REGIONS.map((r) => [r.id, 1])),
+  settings: { quality: params.get('quality') || 'media' },
+  player: { x: 0, y: 0, z: 0.01, rotY: 0 },
+  pincesoJoined: params.get('mode') === 'follow' || !params.get('mode'),
+  accessories: { owned: {}, equipped: params.get('acc') || null },
+  flags: {},
+};
+
+// --- mundo de mentirinha -------------------------------------------------------------------------
+const hill = (x, z) => { const d = Math.hypot(x - 14, z + 12); return d < 9 ? 3 * (0.5 + 0.5 * Math.cos(Math.PI * d / 9)) : 0; };
+const ROCK = { x: -6, z: -10, r: 1.4, y: 2.2 };    // "Pedra Musguinho" de teste
+const world = {
+  getHeight: (x, z) => hill(x, z),
+  groundAt(x, z, y) {
+    const h = hill(x, z);
+    if (Math.hypot(x - ROCK.x, z - ROCK.z) <= ROCK.r && ROCK.y <= y + 0.6 && ROCK.y > h) return { y: ROCK.y, surface: ROCK };
+    return { y: h, surface: null };
+  },
+  resolveCollision() {},
+  isWater: () => false,
+  gateBlocked: () => null,
+  regionAt: () => 'ninhal',
+};
+
+const voices = [];
+const toasts = [];
+const toastEl = document.getElementById('toast');
+const game = {
+  THREE, params, state, bus: createBus(), world,
+  interactables: createInteractables(), findables: new Set(),
+  paused: false, cinematic: false, time: { elapsed: 0 },
+  ui: {
+    setPrompt() {},
+    toast(t) { toasts.push(t); toastEl.textContent = t; toastEl.style.display = 'block'; setTimeout(() => { toastEl.style.display = 'none'; }, 3000); },
+  },
+  audio: {
+    play: () => {},
+    quimVoice: () => {},
+    pincesoVoice: (n) => voices.push(n),
+  },
+  missions: { marker: null, markerTarget() { return this.marker; } },
+};
+
+const render = createRender(game, document.getElementById('root'));
+game.render = render;
+game.input = createInput(render.renderer.domElement);
+const scene = render.scene;
+
+const ground = new THREE.Mesh(new THREE.PlaneGeometry(200, 200, 100, 100).rotateX(-Math.PI / 2), toon('#9ee07a'));
+{
+  const pa = ground.geometry.attributes.position;
+  for (let i = 0; i < pa.count; i++) pa.setY(i, hill(pa.getX(i), pa.getZ(i)));
+  ground.geometry.computeVertexNormals();
+}
+ground.receiveShadow = true;
+scene.add(ground);
+{
+  const rock = new THREE.Mesh(new THREE.CylinderGeometry(ROCK.r, ROCK.r * 1.3, ROCK.y, 14), toon('#9aa6a0'));
+  rock.position.set(ROCK.x, ROCK.y / 2, ROCK.z);
+  scene.add(enableShadows(rock));
+  const moss = new THREE.Mesh(new THREE.SphereGeometry(ROCK.r * 1.02, 16, 8, 0, Math.PI * 2, 0, Math.PI / 2).scale(1, 0.07, 1), toon("#7fcf6a"));
+  moss.position.set(ROCK.x, ROCK.y - 0.1, ROCK.z);
+  scene.add(moss);
+}
+// flores e um pilar com olhos para dar escala
+for (let i = 0; i < 50; i++) {
+  const x = (Math.sin(i * 12.9898) * 43758.5453 % 1) * 30, z = (Math.sin(i * 78.233) * 12345.678 % 1) * 30;
+  const f = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 6), toon(['#ff8fc7', '#ffd166', '#c49bff'][i % 3]));
+  f.position.set(x, hill(x, z) + 0.15, z);
+  scene.add(f);
+}
+{
+  const m = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.8, 4, 20), toon('#c9a6ff'));
+  m.position.set(5, 2, 4);
+  const e = createEyes({ size: 0.3, lashes: true });
+  e.position.set(0, 1, 0.78);
+  m.add(e); registerEyes(e);
+  scene.add(enableShadows(m));
+}
+
+// jujubas e um item de missão "achaveis" pelo Voo de Busca
+const jujubas = [];
+for (const [x, z, c] of [[9, -14, '#ff6fae'], [-14, 6, '#ffd166'], [30, 30, '#7fd8ff']]) {
+  const j = new THREE.Mesh(new THREE.SphereGeometry(0.16, 12, 10).scale(1, 1.2, 1), toon(c, { emissive: c, emissiveIntensity: 0.3 }));
+  j.position.set(x, hill(x, z) + 0.3, z);
+  scene.add(enableShadows(j));
+  jujubas.push(j);
+}
+game.findables.add(() => jujubas.filter((j) => j.visible).map((j) => ({ x: j.position.x, y: j.position.y, z: j.position.z, kind: 'jujuba' })));
+const ovo = new THREE.Mesh(new THREE.SphereGeometry(0.2, 12, 10).scale(1, 1.3, 1), toon('#d9ecff'));
+ovo.position.set(-25, 0.26, -30);
+scene.add(enableShadows(ovo));
+game.findables.add(() => [{ x: ovo.position.x, y: ovo.position.y, z: ovo.position.z, kind: 'ovo' }]);
+
+game.player = createPlayer(game);
+game.cameraRig = createCameraRig(game);
+game.player.applyState();
+game.cameraRig.snap();
+game.pinceso = createPinceso(game);
+game.pinceso.applyState();
+
+const P = game.pinceso;
+function setScenario(m) {
+  if (m === 'trapped') P.setMode('trapped', { x: 2.5, z: -3 });
+  else if (m === 'fleeing') P.setMode('fleeing', { points: [{ x: 3, z: -6 }, { x: -2, z: -9 }, { x: ROCK.x, y: ROCK.y, z: ROCK.z }] });
+  else if (m === 'perched') P.setMode('perched', { x: ROCK.x, y: ROCK.y, z: ROCK.z });
+  else if (m === 'cafe') P.setMode('perched', { x: 1.2, y: 0, z: 1.2, cafe: true, rotY: -2.3 });
+  else if (m === 'follow') { state.pincesoJoined = true; P.applyState(); }
+}
+if (params.get('mode')) setScenario(params.get('mode'));
+addEventListener('keydown', (e) => {
+  const map = { Digit1: 'follow', Digit2: 'trapped', Digit3: 'fleeing', Digit4: 'perched', Digit5: 'cafe' };
+  if (map[e.code]) setScenario(map[e.code]);
+  if (e.code === 'KeyJ') P.join();
+  if (e.code === 'KeyC') game.bus.emit('mission:complete', { id: 'teste' });
+});
+await render.warmup?.();
+
+const clock = new THREE.Clock();
+const info = document.getElementById('info');
+function step(dt) {
+  game.time.elapsed += dt;
+  render.update(dt);
+  game.player.update(dt);
+  P.update(dt);
+  updateEyes(dt, game.player.position, game.player.position, 0);
+}
+function frame() {
+  requestAnimationFrame(frame);
+  const dt = Math.min(clock.getDelta(), 1 / 20);
+  if (!game.paused && !window.__manual) step(dt);
+  if (!window.__manual) game.cameraRig.update(dt);
+  render.render();
+  game.input.endFrame();
+  const p = P.position;
+  info.textContent = `pinceso: ${P.mode}/${P.action} · ${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}\nquim: ${game.player.state} · vozes: ${voices.slice(-6).join(' ')}`;
+}
+frame();
+
+/** Câmera de retrato: olha para o Pinceso (ou um ponto) de um ângulo (graus, relativo ao rotY da Quim). */
+function closeup(angleDeg = 0, dist = 1.0, h = 0.15, target = null) {
+  const t = target || P.position.clone().add(new THREE.Vector3(0, 0.15, 0));
+  const a = game.player.rotY + angleDeg * Math.PI / 180;
+  game.cameraRig.setCinematic({ x: t.x + Math.sin(a) * dist, y: t.y + h, z: t.z + Math.cos(a) * dist, lookX: t.x, lookY: t.y, lookZ: t.z }, 0);
+}
+window.__game = {
+  ready: true, THREE, render, state, game, player: game.player, pinceso: P, cameraRig: game.cameraRig, input: game.input,
+  bus: game.bus, voices, toasts, closeup, step, setScenario, jujubas, ovo,
+};
+</script>
+</body>
+</html>

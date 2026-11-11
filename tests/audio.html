@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mundo Olhos — teste de áudio</title>
+<style>
+  :root { --bg:#2b1d47; --card:#3d2a63; --pink:#ff9ecf; --mint:#9ff0d0; --txt:#fff3fb; }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:20px; background:radial-gradient(circle at 30% 0%, #4b2f7a, var(--bg)); color:var(--txt);
+    font:15px/1.4 system-ui, sans-serif; min-height:100vh; }
+  h1 { margin:0 0 4px; font-size:24px; } p { margin:0 0 12px; opacity:.8; }
+  section { background:var(--card); border-radius:18px; padding:12px 14px; margin:0 0 12px; }
+  h2 { margin:0 0 8px; font-size:15px; color:var(--mint); }
+  button { background:#ffe3f3; color:#4a2a5e; border:0; border-radius:999px; padding:7px 13px; margin:3px; font:600 14px system-ui;
+    cursor:pointer; box-shadow:0 3px 0 #c97aa7; }
+  button:active { transform:translateY(2px); box-shadow:0 1px 0 #c97aa7; }
+  button.on { background:var(--mint); box-shadow:0 3px 0 #4fae8c; }
+  canvas { width:100%; height:110px; background:#1f1436; border-radius:14px; display:block; }
+  label { margin-right:14px; } input[type=text] { width:60%; padding:6px 10px; border-radius:10px; border:0; }
+  #status { font:12px monospace; opacity:.85; white-space:pre; }
+</style>
+</head>
+<body>
+<h1>🎵 Áudio do Mundo Olhos</h1>
+<p>Clique em qualquer botão para destravar o áudio. Tudo é sintetizado na hora (Web Audio API).</p>
+<section><canvas id="scope" width="1200" height="110"></canvas><div id="status"></div></section>
+<section><h2>Música (crossfade ~2 s)</h2><div id="music"></div></section>
+<section><h2>Efeitos</h2><div id="sfx"></div></section>
+<section><h2>Quim</h2><div id="quim"></div><h2 style="margin-top:8px">Pinceso</h2><div id="pin"></div></section>
+<section><h2>Coral (5 notas)</h2><div id="notes"></div></section>
+<section><h2>Murmurinho</h2>
+  <input type="text" id="fala" value="Oi, Quim! Você viu o meu gatinho? Ele fugiu de novo, acredita?">
+  <div id="vozes"></div></section>
+<section><h2>Mixer</h2>
+  <label>Música <input type="range" id="vm" min="0" max="1" step="0.01" value="0.6"></label>
+  <label>Efeitos <input type="range" id="vs" min="0" max="1" step="0.01" value="0.8"></label>
+  <button id="night">simular noite</button> <button id="region">entrar no Ninhal</button>
+</section>
+<script type="module">
+import { createBus } from '../src/core/bus.js';
+import { createAudio } from '../src/audio/audio.js';
+import { createSynth } from '../src/audio/synth.js';
+import { makeInstruments } from '../src/audio/instruments.js';
+import { makeSfx } from '../src/audio/sfx.js';
+import { makeVoices } from '../src/audio/voices.js';
+import { SONGS } from '../src/audio/songs.js';
+
+const bus = createBus();
+const game = { bus, state: { settings: { music: 0.6, sfx: 0.8 } }, render: null, world: null, player: null };
+const audio = createAudio(game);
+game.audio = audio;
+const $ = (id) => document.getElementById(id);
+const btn = (parent, label, fn) => { const b = document.createElement('button'); b.textContent = label; b.onclick = () => { audio.init(); fn(b); }; $(parent).appendChild(b); return b; };
+
+// API chamada antes do init: deve ser ignorada sem erro
+audio.play('pulo'); audio.murmur({ pitch: 1 }, 'a'); audio.quimVoice('uii'); audio.note(2); audio.update(0.016);
+audio.setMusic('menu');
+
+const musicBtns = [];
+for (const id of ['menu', 'campo', 'vila', 'ninhal', 'bosque', 'cidade', 'pico', 'cafe', 'noite', null]) {
+  const b = btn('music', id ?? 'silêncio', () => { audio.setMusic(id); musicBtns.forEach((x) => x.classList.toggle('on', x === b)); });
+  musicBtns.push(b);
+}
+for (const n of ['pulo', 'aterrissar', 'passo', 'coleta', 'jujuba', 'missao', 'dialogo', 'clique', 'mover', 'brilho', 'piado', 'ovo', 'agua', 'porta', 'moeda', 'cor'])
+  btn('sfx', n, () => audio.play(n));
+for (const n of ['hmm', 'uii', 'risadinha', 'bocejo', 'oh', 'eba']) btn('quim', n, () => audio.quimVoice(n));
+for (const n of ['piu', 'piui', 'feliz', 'sono', 'alerta']) btn('pin', n, () => audio.pincesoVoice(n));
+for (let i = 0; i < 5; i++) btn('notes', `nota ${i}`, () => audio.note(i));
+
+const VOZES = {
+  Quim: { pitch: 1.35, speed: 1.1, timbre: 'doce' }, Pinceso: { pitch: 1.9, speed: 1.35, timbre: 'piado' },
+  doce: { pitch: 0.95, speed: 0.85, timbre: 'doce' }, grave: { pitch: 0.75, speed: 0.85, timbre: 'grave' },
+  rouco: { pitch: 0.85, speed: 0.9, timbre: 'rouco' }, nasal: { pitch: 1.25, speed: 1.2, timbre: 'nasal' },
+  fofo: { pitch: 1.6, speed: 1.3, timbre: 'fofo' }, suave: { pitch: 0.85, speed: 1.3, timbre: 'suave' },
+  arrastado: { pitch: 0.75, speed: 0.5, timbre: 'arrastado' },
+};
+// imita a caixa de diálogo: ~38 caracteres por segundo
+function speak(voice) {
+  const txt = $('fala').value; let i = 0;
+  const id = setInterval(() => { if (i >= txt.length) return clearInterval(id); audio.murmur(voice, txt[i++]); }, 1000 / (38 * (voice.speed || 1)));
+}
+for (const [k, v] of Object.entries(VOZES)) btn('vozes', k, () => speak(v));
+
+$('vm').oninput = $('vs').oninput = () => audio.setVolumes({ music: +$('vm').value, sfx: +$('vs').value });
+let night = false;
+$('night').onclick = () => { audio.init(); night = !night; bus.emit('time:phase', { phase: night ? 'noite' : 'dia' }); $('night').classList.toggle('on', night); audio.setMusic('campo'); };
+$('region').onclick = () => { audio.init(); bus.emit('region:enter', { id: 'ninhal', name: 'Ninhal Cantante' }); audio.setMusic('ninhal'); };
+
+// loop: update() + osciloscópio
+let analyser = null, last = performance.now();
+const cv = $('scope'), g2 = cv.getContext('2d');
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  audio.update(dt);
+  const ctx = audio.context;
+  if (ctx && !analyser && audio.output) { analyser = ctx.createAnalyser(); analyser.fftSize = 1024; audio.output.connect(analyser); }
+  g2.fillStyle = '#1f1436'; g2.fillRect(0, 0, cv.width, cv.height);
+  if (analyser) {
+    const d = new Uint8Array(analyser.frequencyBinCount); analyser.getByteFrequencyData(d);
+    for (let i = 0; i < 200; i++) { const v = d[i * 2] / 255; g2.fillStyle = `hsl(${300 + i},80%,${55 + v * 25}%)`; g2.fillRect(i * 6, cv.height * (1 - v), 5, cv.height * v); }
+  }
+  const p = audio.pools;
+  $('status').textContent = `ctx: ${ctx?.state ?? 'não iniciado'} · música: ${audio.currentMusic ?? '—'} · vozes ativas: ` +
+    (p ? Object.entries(p).map(([k, v]) => `${k} ${v.active}/${v.max}`).join(' · ') : '—');
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// -------------------------------------------------------------------------------------------
+// Análise offline (para o harness): renderiza cada som num OfflineAudioContext e mede pico/RMS.
+async function renderStats(seconds, fn) {
+  const ctx = new OfflineAudioContext(2, Math.ceil(44100 * seconds), 44100);
+  const S = createSynth(ctx);
+  const I = makeInstruments(S);
+  const sink = ctx.createGain(); sink.connect(ctx.destination);
+  const wet = ctx.createGain(); wet.gain.value = 0; wet.connect(ctx.destination);
+  await fn({ ctx, S, I, sink, R: { pool: 'sfx', dest: sink, send: wet, wet: 0.2 }, Rv: { pool: 'voice', dest: sink, send: wet, wet: 0.1 } });
+  const buf = await ctx.startRendering();
+  await new Promise((r) => setTimeout(r, 50));
+  let peak = 0, sum = 0, nanCount = 0;
+  const L = buf.getChannelData(0), Rr = buf.getChannelData(1);
+  for (let i = 0; i < L.length; i++) {
+    const v = Math.max(Math.abs(L[i]), Math.abs(Rr[i]));
+    if (Number.isNaN(L[i])) nanCount++;
+    if (v > peak) peak = v; sum += L[i] * L[i];
+  }
+  // clique no fim? último milissegundo deve estar ~silencioso
+  let tail = 0; for (let i = L.length - 44; i < L.length; i++) tail = Math.max(tail, Math.abs(L[i]));
+  const leaked = Object.fromEntries(Object.entries(S.pools).map(([k, v]) => [k, v.active]));
+  return { peak: +peak.toFixed(3), rms: +Math.sqrt(sum / L.length).toFixed(4), tail: +tail.toFixed(4), nan: nanCount, leaked };
+}
+
+async function analyze() {
+  const out = { sfx: {}, quim: {}, pinceso: {}, notes: {}, murmur: {}, songs: {} };
+  for (const n of ['pulo', 'aterrissar', 'passo', 'coleta', 'jujuba', 'missao', 'dialogo', 'clique', 'mover', 'brilho', 'piado', 'ovo', 'agua', 'porta', 'moeda', 'cor'])
+    out.sfx[n] = await renderStats(3, ({ S, I, R }) => makeSfx(S, I).play(R, n, 0.01));
+  for (const n of ['hmm', 'uii', 'risadinha', 'bocejo', 'oh', 'eba'])
+    out.quim[n] = await renderStats(2, ({ S, I, Rv }) => makeVoices(S, I).quim(Rv, n, 0.01));
+  for (const n of ['piu', 'piui', 'feliz', 'sono', 'alerta'])
+    out.pinceso[n] = await renderStats(2, ({ S, I, Rv }) => makeVoices(S, I).pinceso(Rv, n, 0.01));
+  for (let i = 0; i < 5; i++) out.notes[i] = await renderStats(1.5, ({ S, I, R }) => makeVoices(S, I).note(R, i, 0.01));
+  for (const [k, v] of Object.entries(VOZES)) {
+    // murmur usa o relógio do contexto: num offline sem avançar, dispara só uma sílaba — medimos 1 sílaba de cada letra
+    out.murmur[k] = await renderStats(0.6, ({ S, I, Rv }) => makeVoices(S, I).murmur(Rv, v, 'a'));
+  }
+  for (const id of Object.keys(SONGS)) {
+    const def = SONGS[id];
+    const spb = 60 / def.bpm, barDur = def.beats * spb, bars = 8;
+    out.songs[id] = await renderStats(barDur * bars + 2, ({ ctx, S, I, R, sink }) => {
+      S.pools.music.max = 400;
+      sink.gain.value = def.gain ?? 1;
+      const e = { I, spb, beats: def.beats, st: {}, R: { ...R, pool: 'music', wet: 0.28 }, at: (t, b) => t + b * spb,
+        vinyl: () => null, windLoop: () => null };
+      def.start?.(e);
+      for (let n = 0; n < bars; n++) def.bar(e, n, 0.05 + n * barDur);
+    });
+  }
+  // camadas em loop (vinil do café e vento)
+  const { vinylLoop, windLoop } = await import('../src/audio/loops.js');
+  out.loops = {
+    vinil: await renderStats(4, ({ ctx, sink }) => { vinylLoop(ctx, sink, 0.35, 0.01); }),
+    vento: await renderStats(4, ({ ctx, S, sink }) => { windLoop(ctx, S.noiseBuf, sink, 0.3, { fadeIn: 0.01 }); }),
+  };
+  return out;
+}
+
+window.__game = { ready: true, audio, bus, analyze };
+</script>
+</body>
+</html>
